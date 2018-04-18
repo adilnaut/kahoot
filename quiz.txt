@@ -1,0 +1,20 @@
+1 What is a system call?
+A A call to the system
+B A function call that invokes the operating system to take some action
+C A call to the operating system
+
+B
+
+2 Another question?
+A This is the right answer
+B This is not a right answer
+C This is also not a right answer
+
+A
+
+3 Another question?
+A This is the right answer
+B This is not a right answer
+C This is also not a right answer
+
+A
