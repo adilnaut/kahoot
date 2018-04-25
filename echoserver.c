@@ -19,6 +19,15 @@
 #define MAXTOKENS 100
 #define MAXQ 100
 
+// TO DO:
+// DONE 	1. Add taking_quiz variable into the cient Structure
+// DONE 	2. Add OPENGROUPS / UPDATE/ENDGROUP messages and make them available or sent only if taking_quiz is false for each Client
+// DOING 	3. Add timeouts for all the users, and continue if there is nothing to read and they are not taking quiz
+
+// TODO 	4. Write Quiz logic using taking_quiz and timeouts
+
+
+
 // UPD, architecture is changed, groups and quizes will both be implemented in the main thread
 // however, time costly operations, like file sending will be implemented in the threads
 
@@ -72,13 +81,15 @@ struct User{
 	int fid;// unique
 	char * name;
 	int score;
-	int groupnum;
-	int is_in_group; // 0 if not in group, 1 otherwise
+  char * groupname;
+	int is_in_group; // 1 if in group, 0 otherwise
 	// in order to write logic sequentially using multiplexing,
 	// we need to keep and properly propagate last state, where logic ended
 	//because each time user have written something, there will be a new iteration
 	// initialy should be set to -1
 	int state;
+	// 1 if now user is taking quiz is, 0 otherwise
+	int taking_quiz;
 
 };
 struct User users[MAXUSERS];
@@ -95,15 +106,58 @@ int get_user_id_by_fid(int fid_in){
 	return -1;
 }
 
-void joined_group(int group_index, int user_id){
+
+
+void joined_group(char * groupname, int user_id){
 	users[user_id].is_in_group = 1;
-	users[user_id].groupnum = group_index;
+	// users[user_id].score = 0;
+	int gid = get_group_id_by_name(groupname);
+	groups.[gid].members[groups[gid].current_groupsize] = users[user_id];
+	groups[gid].current_groupsize
+	users[user_id].groupname = groupname;
 }
+
 void leaved_group(int user_id){
+	users[user_id].score = 0;
 	users[user_id].is_in_group = 0;
+	int gid = get_group_id_by_name(users[user_id].groupname);
+	int temp;
+	for(int i = 0; i < groups[gid].current_groupsize;i++){
+		struct User cur_user = members[i];
+		if (users[user_id].fid == cur_user.fid){
+			temp = i;
+			break;
+		}
+	}
+	for(int i = temp; i < groups[gid].current_groupsize-1; i++){
+		members[i] = members[i+1];
+	}
+	groups[gid].current_groupsize--;
 }
 
+// IT's better to deesign it in different way, accessing file descriptors here might be problematic
+// send message to all users, except those who are taking quiz now
+void send_message_to_all(char * message){
+	for (int i = 0; i < num_of_users; i++){
+		if (!users[i].taking_quiz){
+				 write( users[i].fd, message, strlen(message) );
+		}
+	}
+}
 
+void set_user_offline(user_id){
+	if (users[user_id].is_in_group){
+		char * username = users[user_id].name;
+		leaved_group(user_id);
+		for (int i = user_id; i < num_of_users - 1; i++){
+			users[i] = users[i + 1];
+		}
+		num_of_users--;
+		printf("User with username %s was deleted!\n", username);
+	} else{
+		printf("There is no such User!\n");
+	}
+}
 
 // in this thread server will receive the file and parse for quiz
 void *thread_for_file( void *ign ){
@@ -143,6 +197,12 @@ void *thread_for_file( void *ign ){
 	if ( strcmp(tokens[0], "QUIZ") != 0 ){
 
 	}
+	if ( strcmp(tokens[1], "QUIZ") != 0 ){
+
+	}
+
+
+
 	file_size = atoi(tokens[1]);
 	// code copied from my own last submission of homework4,
 	// this code parses file character by character
@@ -177,6 +237,14 @@ void *thread_for_file( void *ign ){
 	}
 	struct Quiz new_quiz = {0,0,0,Questions, Answers, "", num_questions,""};
 	groups[i].quiz = new_quiz;
+	// char *response = "UPDGROUP"
+	int uid = get_user_id_by_fid(fd);
+	if (uid != -1){
+																																										// TO DO:
+																																									  // think about this decision one more time
+		//in order to write UPD messages to all clients in the main thread
+		users[uid].state = 1;
+	}
 }
 
 // linked list groups implementation, slow and unefficient, but straignforward
@@ -211,12 +279,23 @@ int is_in_groups(char * name_to_check){
   return 0;
 }
 
-struct Group get_group_by_name( char * gname){
+int get_group_id_by_name( char * gname){
   for(int i = 0; i < num_of_groups; i++){
     if ( strcmp(groups[i].groupname, gname) == 0 ){
-        return groups[i];
+        return i;
     }
   }
+	return -1;
+}
+
+// return group_id if such groip was found, -1 otherwise
+int get_group_id_leader_fid(int fd){
+	for(int i = 0; i < num_of_groups; i++){
+		if ( groups[i].leader_fid == fid ){
+				return i;
+		}
+	}
+	return -1;
 }
 
 int passivesock( char *service, char *protocol, int qlen, int *rport);
@@ -224,7 +303,6 @@ int passivesock( char *service, char *protocol, int qlen, int *rport);
 
 int main(int argc, char *argv[]){
   char * service; //port
-  char * filename;
   int msock; // main socket
   int ssock; //client's socket
   int rport = 0; // shows whether port is set by OS
@@ -235,6 +313,13 @@ int main(int argc, char *argv[]){
   int alen;
   fd_set read_set;
   fd_set a_set;
+
+	// for work with timeouts in multiplexing, code from linux manual have been used.
+	// https://linux.die.net/man/2/select
+
+	struct timeval tv;
+	tv.tv_sec = 30;
+	tv.tv_usec = 0;
 
 
   int fd;
@@ -249,11 +334,11 @@ int main(int argc, char *argv[]){
       filename = argv[1];
       rport = 1;
       break;
-    case 3:
-      // use provided by user port
-      filename = argv[1];
-      service = argv[2];
-      break;
+    // case 3:
+    //   // use provided by user port
+    //   filename = argv[1];
+    //   service = argv[2];
+    //   break;
     default:
       fprintf( stderr, "usage: server [port]\n" );
       exit(-1);
@@ -272,13 +357,15 @@ int main(int argc, char *argv[]){
 
     // file descriptors we need each time will appear in copy_read_Set
     memcpy( (char *)&read_set, (char *)&a_set, sizeof(read_set));
-
+		int sel_stat = select(nfds, &read_set, (fd_set *)0, (fd_set *)0, &tv);
     // wait for the sockets who are ready to read or write, or throw an exception
-    if ( select(nfds, &read_set, (fd_set *)0, (fd_set *)0,
-				(struct timeval *)0) < 0 ){
+    if ( sel_stat < 0 ){
       fprintf( stderr, "server select: %s\n", strerror(errno) );
       exit(-1);
     }
+		if (sel_stat == 0){
+			//timeout in one of the all clients
+		}
 
     // select is unblocked
     if ( FD_ISSET( msock, &read_set ) )
@@ -307,6 +394,9 @@ int main(int argc, char *argv[]){
          strcat(message, outs);
        }
        strcat(message, "\r\n");
+			 struct User new_user = {fd, "", 0, "", 0,-1, 0};
+			 users[num_of_users] = new_user;
+			 num_of_users++;
        //check if message string is  terminated correctly
        write( fd, message, strlen(message) );
     }
@@ -315,7 +405,26 @@ int main(int argc, char *argv[]){
       // printf("%i - th file disriptor loop\n", fd);
           if ( fd != msock && FD_ISSET(fd, &read_set)){
 						int user_id = get_user_id_by_fid(fd);
-						int state = users[user_id].state;
+						int state;
+						if ( user_id != -1){
+							state = users[user_id].state;
+						}
+						// state == 1 will be reserved for sending the UPD message about group creation
+						if (state == 1){																											//TO DO
+																																									// make send message to all users threaded
+																																									// or include as a main bug in report (
+							// state should be one only if we are in leader of the newly created group
+							response = "UPDGROUP\r\n";
+							int new_gid = get_group_id_leader_fid(fd); // id
+							if (new_gid != -1){
+								char outs[BUFSIZE];
+								snprintf(outs, sizeof(outs), "|%s|%s|%i|%i", groups[new_gid].topic, groups[new_gid].groupname, groups[new_gid].groupsize, groups[new_gid].current_groupsize);
+								strcat(response, outs);
+								strcat(response, "\r\n");
+								send_message_to_all(response);
+							}
+							users[user_id].state = 0;
+						}
             // printf("%i-th file discriptor is ready to be read\n", fd);
              if ( (cc = read( fd, buf, BUFSIZE)) <= 0 ){
                printf("Client has gone.\n");
@@ -331,19 +440,21 @@ int main(int argc, char *argv[]){
                // parse user's commands
                char **commands;
                int count = 0;
+
                parse_string(buf, cc);
 							 commands = func_tokens;
 							 count = func_tcount;
-
+							 char * response;
                if (strcmp( commands[0], "GROUP") == 0 ){
-									 char * response;
-									 if (is_in_groups( commands[1] ) == 1){
-										 response = "BAD";
+									// if such group exists or current user
+									 if ( ((user_id != -1) && (users[user_id].is_in_group == 1)) || is_in_groups( commands[1] ) == 1 )
+										 response = "BAD\r\n";
 										 write( fd, response, strlen(response) );
-									 } else{
+									 }else{
 										 struct User members[MAXUSERS];
 										 struct Group new_group = {commands[1], commands[2], commands[3], 0, members, NULL, fd};
-										 response = "QUIZ";
+										 response = "QUIZ\r\n";
+
 										 write( fd, response, strlen(response) );
 										 // potentially dangerous
 										 // should rewrite it
@@ -353,19 +464,68 @@ int main(int argc, char *argv[]){
 										 num_of_groups++;
 	    			 				 pthread_create(&thread, 0, thread_for_file, (void *) temp);
 									 }
-
+									 continue;
                }
+							 // add error handling when admin tries to cancel group during the quiz
 							 if (strcmp( commands[0], "CANCEL") == 0 ){
-
+								 if ( (user_id != -1) && (users[user_id].is_in_group == 1) ){
+										response = "BAD\r\n";
+								 } else{
+									 	response = "OK\r\n";
+									 	remove_from_groups(commands[1]);
+										char * message = "ENDGROUP";
+										send_message_to_all(strcat(message,commands[1]));
+								 }
+								 write( fd, response, strlen(response) );
+								 continue;
 							 }
 							 if (strcmp( commands[0], "JOIN") == 0 ){
-
+								 int gid = get_group_id_by_name(commands[1]);
+								 if (  gid != -1){
+									 if (groups[gid].groupsize >= groups[gid].current_groupsize){
+										 response = "FULL\r\n";
+									 }else{
+									 		if ( (user_id != -1) ){
+												response = "OK\r\n";
+										  	users[user_id].name = commands[2];
+										  	joined_group(commands[1], user_id);
+									 		}
+								 	 }
+								 } else{
+									 response = "NOGROUP\r\n";
+								 }
+								 write( fd, response, strlen(response) );
+								 continue;
 							 }
 							 if (strcmp( commands[0], "LEAVE") == 0 ){
-
+								 if ( (user_id!= -1) && (users[user_id].is_in_group )){
+									 leaved_group(user_id);
+									 response = "OK\r\n";
+								 } else{
+									 response = "BAD\r\n";
+								 }
+								 write( fd, response, strlen(response) );
+								 continue;
 							 }
 							 if (strcmp( commands[0], "GETOPENGROUPS") == 0 ){
 
+								 response = "OPENGROUPS";
+								 // add condition if user not taking the quiz
+								 // probably will be rewriten
+								 if ( (user_id != -1) && (users[user_id].taking_quiz == 0) ){
+									 for(int i = 0; i < num_of_groups; i++){
+										 char outs[BUFSIZE];
+										 snprintf(outs, sizeof(outs), "|%s|%s|%i|%i", groups[i].topic, groups[i].groupname, groups[i].groupsize, groups[i].current_groupsize);
+										 strcat(response, outs);
+									 }
+									 strcat(response, "\r\n");
+									 write( fd, response, strlen(response) );
+
+								 } else{
+									 // do not response otherwise
+									 // response = ""
+								 }
+								 continue;
 							 }
 
 
